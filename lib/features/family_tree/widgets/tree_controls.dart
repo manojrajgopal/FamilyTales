@@ -231,10 +231,59 @@ class _LayoutSheetState extends State<_LayoutSheet> {
               ),
             ),
           ),
+        const SizedBox(height: Gap.xs),
+        const _GenderToggle(),
         const SizedBox(height: Gap.lg),
         Text('Line styles', style: context.tx.caption),
         const SizedBox(height: Gap.xs),
         const _Legend(),
+      ],
+    );
+  }
+}
+
+class _GenderToggle extends ConsumerWidget {
+  const _GenderToggle();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.ft;
+    final on = ref.watch(settingsProvider.select((s) => s.showGender));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        FTSwitchRow(
+          icon: AppIcons.neutral,
+          title: 'Show gender',
+          subtitle: 'Colour each card so men and women are easy to tell apart',
+          value: on,
+          onChanged: (v) => ref.read(settingsProvider.notifier).update((p) => p.copyWith(showGender: v)),
+        ),
+        if (on)
+          Wrap(
+            spacing: 14,
+            runSpacing: 8,
+            children: [
+              for (final gg in GenderStyle.shown)
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 22,
+                      height: 16,
+                      decoration: BoxDecoration(
+                        color: GenderStyle.of(gg, dark: c.isDark)!.color.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(color: GenderStyle.of(gg, dark: c.isDark)!.color, width: 2),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(child: Text(gg.label, style: context.tx.label.copyWith(color: c.text2))),
+                  ],
+                ),
+              Text('No colour: not specified', style: context.tx.label.copyWith(color: c.text3)),
+            ],
+          ),
       ],
     );
   }
@@ -256,7 +305,7 @@ class _Legend extends StatelessWidget {
                 child: CustomPaint(painter: _LinePainter(color ?? c.text2, dash)),
               ),
               const SizedBox(width: 12),
-              Text(label, style: context.tx.label.copyWith(color: c.text2)),
+              Expanded(child: Text(label, style: context.tx.label.copyWith(color: c.text2))),
             ],
           ),
         );
@@ -439,6 +488,7 @@ class SelectedPersonPanel extends ConsumerWidget {
     } else if (home == person.id) {
       sub = [if (sub.isNotEmpty) sub, 'Home person'].join(' · ');
     }
+    final gender = GenderStyle.of(person.gender, dark: context.ft.isDark);
     return FTCard(
       padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
       child: Column(
@@ -454,8 +504,22 @@ class SelectedPersonPanel extends ConsumerWidget {
                   children: [
                     Text(person.displayName,
                         maxLines: 1, overflow: TextOverflow.ellipsis, style: context.tx.section),
-                    if (sub.isNotEmpty)
-                      Text(sub, maxLines: 2, overflow: TextOverflow.ellipsis, style: context.tx.caption),
+                    if (gender != null || sub.isNotEmpty)
+                      Text.rich(
+                        TextSpan(children: [
+                          if (gender != null) ...[
+                            TextSpan(
+                              text: gender.label,
+                              style: TextStyle(color: gender.color, fontWeight: FontWeight.w600),
+                            ),
+                            if (sub.isNotEmpty) const TextSpan(text: ' · '),
+                          ],
+                          TextSpan(text: sub),
+                        ]),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.tx.caption,
+                      ),
                   ],
                 ),
               ),

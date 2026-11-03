@@ -12,6 +12,7 @@ import 'package:family_tales/core/repositories/family_repository.dart';
 import 'package:family_tales/core/services/app_paths.dart';
 import 'package:family_tales/features/backup/backup_service.dart';
 import 'package:family_tales/features/family/domain/kinship.dart';
+import 'package:family_tales/core/widgets/gender_style.dart';
 import 'package:family_tales/features/family_tree/widgets/tree_node.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -126,6 +127,13 @@ void main() {
     expect(kin.primaryLabel(id('Dev'), id('Asha')), 'Child'); // gender not recorded
     expect(kin.primaryLabel(id('Ravi'), id('Dev')), 'Grandfather');
     expect(kin.primaryLabel(id('Kiran'), id('Ravi')), 'Child-in-law');
+    // Gender is visible on the real device as colour only: one coloured card
+    // per recorded gender, nothing for unrecorded ones, no symbols or key.
+    for (final gg in Gender.values.where((x) => x != Gender.unknown)) {
+      final n = g.people.values.where((p) => p.gender == gg).length;
+      expect(find.byKey(ValueKey('gender-${gg.name}')), findsNWidgets(n), reason: gg.name);
+    }
+    expect(find.byType(GenderBadge), findsNothing);
 
     // --------------------------------------------- 9. edit member via form
     final ctx = tester.element(find.byType(TreeNodeCard).first);

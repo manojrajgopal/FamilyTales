@@ -38,6 +38,7 @@ class AppPrefs {
     this.textScale = 1.0,
     this.reduceMotion = false,
     this.fullScreen = true,
+    this.showGender = true,
     this.dashboardOrder = DashboardSection.values,
     this.dashboardHidden = const {},
     this.notificationsEnabled = false,
@@ -68,6 +69,9 @@ class AppPrefs {
 
   /// Hide the status and navigation bars (swipe from an edge to peek).
   final bool fullScreen;
+
+  /// Colour-code people by gender (tree cards, avatars) with a symbol badge.
+  final bool showGender;
   final List<DashboardSection> dashboardOrder;
   final Set<DashboardSection> dashboardHidden;
   final bool notificationsEnabled;
@@ -99,6 +103,7 @@ class AppPrefs {
     double? textScale,
     bool? reduceMotion,
     bool? fullScreen,
+    bool? showGender,
     List<DashboardSection>? dashboardOrder,
     Set<DashboardSection>? dashboardHidden,
     bool? notificationsEnabled,
@@ -127,6 +132,7 @@ class AppPrefs {
         textScale: textScale ?? this.textScale,
         reduceMotion: reduceMotion ?? this.reduceMotion,
         fullScreen: fullScreen ?? this.fullScreen,
+        showGender: showGender ?? this.showGender,
         dashboardOrder: dashboardOrder ?? this.dashboardOrder,
         dashboardHidden: dashboardHidden ?? this.dashboardHidden,
         notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
@@ -157,6 +163,7 @@ class AppPrefs {
         'textScale': '$textScale',
         'reduceMotion': '$reduceMotion',
         'fullScreen': '$fullScreen',
+        'showGender': '$showGender',
         'dashboardOrder': dashboardOrder.map((e) => e.name).join(','),
         'dashboardHidden': dashboardHidden.map((e) => e.name).join(','),
         'notificationsEnabled': '$notificationsEnabled',
@@ -207,6 +214,7 @@ class AppPrefs {
       textScale: double.tryParse(m['textScale'] ?? '') ?? 1.0,
       reduceMotion: b('reduceMotion', false),
       fullScreen: b('fullScreen', true),
+      showGender: b('showGender', true),
       dashboardOrder: order,
       dashboardHidden: list(DashboardSection.values, 'dashboardHidden', const <DashboardSection>[]).toSet(),
       notificationsEnabled: b('notificationsEnabled', false),

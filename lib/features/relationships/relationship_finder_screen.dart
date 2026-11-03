@@ -141,7 +141,7 @@ class _PersonSlot extends StatelessWidget {
         children: [
           person == null
               ? const IconBadge(icon: AppIcons.personAdd, size: 48)
-              : PersonAvatarFor(person!, size: 48),
+              : PersonAvatarFor(person!, size: 48, showGender: true),
           const SizedBox(width: 12),
           Expanded(
             child: Column(

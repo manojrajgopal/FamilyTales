@@ -1,5 +1,7 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 
 import '../../../core/models/enums.dart';
@@ -11,8 +13,14 @@ import '../layout/tree_layout.dart';
 ///   Ended relationships (divorced/separated/ended) are dashed, engagements
 ///   dotted.
 /// * Parent → children: vertical drop from the couple midpoint to a bus,
-///   rounded orthogonal elbows down to each child. Biological = solid,
+///   rounded orthogonal elbows down to each child; a child several
+///   generations down follows its routed lane. Biological = solid,
 ///   adoptive = dashed, step = dotted, foster/guardian = dash-dot.
+/// * Partners who cannot stand side by side: a bracket over the cards
+///   between them.
+/// * Gender colours (when given): each parent's own line, down to the point
+///   where it meets the other parent's line, and their half of the couple
+///   line take the colour of their card border. Shared lines stay neutral.
 /// * Lineage of the selected person (ancestors + descendants) is redrawn in
 ///   the accent colour on top.
 class TreeConnectorPainter extends CustomPainter {
@@ -22,6 +30,7 @@ class TreeConnectorPainter extends CustomPainter {
     required this.accent,
     required this.background,
     required this.highlight,
+    this.personColors = const {},
   });
 
   final TreeLayout layout;
@@ -31,6 +40,9 @@ class TreeConnectorPainter extends CustomPainter {
 
   /// Person ids whose connecting lines are highlighted.
   final Set<String> highlight;
+
+  /// Line colour per person (gender colour); people not listed stay neutral.
+  final Map<String, Color> personColors;
 
   static const _r = 12.0; // elbow radius
 
@@ -55,8 +67,25 @@ class TreeConnectorPainter extends CustomPainter {
       ..strokeCap = StrokeCap.round
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
 
+    Paint tinted(Color c) => Paint()
+      ..color = c
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    // How many parent lines reach each child: where two meet, the shared
+    // drop below the meeting point stays neutral.
+    final incoming = <String, int>{};
+    for (final f in layout.families) {
+      for (final c in f.children) {
+        incoming[c.childId] = (incoming[c.childId] ?? 0) + 1;
+      }
+    }
+
     // ---------------------------------------------------------- families
     final hiPaths = <Path>[];
+    final colored = <(Path, Paint, ParentType)>[];
     for (final f in layout.families) {
       if (f.children.isEmpty) continue;
       final o = f.origin;
@@ -70,9 +99,16 @@ class TreeConnectorPainter extends CustomPainter {
         ..moveTo(o.dx, o.dy)
         ..lineTo(o.dx, busY - _r);
       _stroke(canvas, trunk, base, trunkType);
+      // A single parent's line is theirs alone; a couple's trunk is shared.
+      final own = f.parents.length == 1 ? personColors[f.parents.first] : null;
+      if (own != null) colored.add((trunk, tinted(own), trunkType));
       for (final c in f.children) {
-        final p = _elbow(Offset(o.dx, busY), c.top);
+        final (p, tail) = _rounded([Offset(o.dx, busY - _r), ...c.points(o.dx, busY)]);
         _stroke(canvas, p, base, c.type);
+        if (own != null) {
+          final merged = (incoming[c.childId] ?? 0) > 1;
+          colored.add((merged ? _trimEnd(p, tail) : p, tinted(own), c.type));
+        }
         if (parentsHi && highlight.contains(c.childId)) {
           hiPaths.add(Path()
             ..moveTo(o.dx, o.dy)
@@ -85,8 +121,12 @@ class TreeConnectorPainter extends CustomPainter {
     // ---------------------------------------------------------- partners
     for (final s in layout.partners) {
       final a = s.from, b = s.to;
-      final path = Path();
-      if (s.adjacent || (b.dx - a.dx).abs() < layout.options.nodeWidth * 1.5) {
+      var path = Path();
+      if (!s.adjacent && s.bracketY != null) {
+        // Partners who are not side by side: a bracket over the cards
+        // between them, on its own track.
+        path = _rounded(s.points(layout.options)).$1;
+      } else if (s.adjacent || (b.dx - a.dx).abs() < layout.options.nodeWidth * 1.5) {
         path
           ..moveTo(a.dx, a.dy)
           ..lineTo(b.dx, b.dy);
@@ -104,13 +144,23 @@ class TreeConnectorPainter extends CustomPainter {
           s.status == PartnerStatus.ended ||
           s.status == PartnerStatus.annulled;
       final isHi = highlight.contains(s.a) && highlight.contains(s.b);
-      final p = isHi ? hi : base;
-      if (s.type == PartnerType.engaged) {
-        _dashed(canvas, path, p, 2, 5);
-      } else if (ended) {
-        _dashed(canvas, path, p, 7, 6);
-      } else {
-        canvas.drawPath(path, p);
+      void draw(Path path, Paint p) {
+        if (s.type == PartnerType.engaged) {
+          _dashed(canvas, path, p, 2, 5);
+        } else if (ended) {
+          _dashed(canvas, path, p, 7, 6);
+        } else {
+          canvas.drawPath(path, p);
+        }
+      }
+
+      draw(path, isHi ? hi : base);
+      if (!isHi && s.adjacent) {
+        // Each partner's half of the couple line, up to the meeting point.
+        final mid = Offset((a.dx + b.dx) / 2, a.dy);
+        final ca = personColors[s.a], cb = personColors[s.b];
+        if (ca != null) draw(Path()..moveTo(a.dx, a.dy)..lineTo(mid.dx, mid.dy), tinted(ca));
+        if (cb != null) draw(Path()..moveTo(mid.dx, mid.dy)..lineTo(b.dx, b.dy), tinted(cb));
       }
       if (s.adjacent) {
         final mid = Offset((a.dx + b.dx) / 2, a.dy);
@@ -126,6 +176,11 @@ class TreeConnectorPainter extends CustomPainter {
       }
     }
 
+    // Gender-coloured parent lines go over the neutral ones.
+    for (final (path, paint, type) in colored) {
+      _stroke(canvas, path, paint, type);
+    }
+
     // --------------------------------------------------------- highlight
     for (final p in hiPaths) {
       canvas.drawPath(p, glow);
@@ -133,25 +188,48 @@ class TreeConnectorPainter extends CustomPainter {
     }
   }
 
-  /// Rounded orthogonal path from the bus junction to a child's top edge.
-  Path _elbow(Offset from, Offset childTop) {
-    final p = Path();
-    final dx = childTop.dx - from.dx;
-    if (dx.abs() < 1) {
-      p
-        ..moveTo(from.dx, from.dy - _r)
-        ..lineTo(childTop.dx, childTop.dy);
-      return p;
+  /// [path] without its last [tail] pixels: a parent's own line up to where
+  /// it meets the other parent's line above the child.
+  Path _trimEnd(Path path, double tail) {
+    final out = Path();
+    for (final m in path.computeMetrics()) {
+      out.addPath(m.extractPath(0, (m.length - tail).clamp(0.0, m.length)), Offset.zero);
     }
-    final dir = dx.sign;
-    final r = dx.abs() < _r * 2 ? dx.abs() / 2 : _r;
-    p
-      ..moveTo(from.dx, from.dy - r)
-      ..quadraticBezierTo(from.dx, from.dy, from.dx + dir * r, from.dy)
-      ..lineTo(childTop.dx - dir * r, from.dy)
-      ..quadraticBezierTo(childTop.dx, from.dy, childTop.dx, from.dy + r)
-      ..lineTo(childTop.dx, childTop.dy);
-    return p;
+    return out;
+  }
+
+  /// Orthogonal polyline with rounded corners, and the length of its final
+  /// straight run after the last corner.
+  (Path, double) _rounded(List<Offset> raw) {
+    final pts = <Offset>[];
+    for (final q in raw) {
+      if (pts.isNotEmpty && (pts.last - q).distance < 0.01) continue;
+      if (pts.length >= 2) {
+        final a = pts[pts.length - 2], b = pts.last;
+        if (((a.dx - b.dx).abs() < 0.01 && (b.dx - q.dx).abs() < 0.01) ||
+            ((a.dy - b.dy).abs() < 0.01 && (b.dy - q.dy).abs() < 0.01)) {
+          pts.removeLast();
+        }
+      }
+      pts.add(q);
+    }
+    final p = Path()..moveTo(pts.first.dx, pts.first.dy);
+    if (pts.length < 2) return (p, 0.0);
+    var tail = (pts.last - pts[pts.length - 2]).distance;
+    for (var i = 1; i < pts.length - 1; i++) {
+      final a = pts[i - 1], b = pts[i], c = pts[i + 1];
+      final lin = (b - a).distance, lout = (c - b).distance;
+      // The first and last runs may be used up entirely by a corner; inner
+      // runs are shared by two corners.
+      final r = math.min(_r, math.min(i == 1 ? lin : lin / 2, i == pts.length - 2 ? lout : lout / 2));
+      final p1 = b - (b - a) / lin * r, p2 = b + (c - b) / lout * r;
+      p
+        ..lineTo(p1.dx, p1.dy)
+        ..quadraticBezierTo(b.dx, b.dy, p2.dx, p2.dy);
+      if (i == pts.length - 2) tail = lout - r;
+    }
+    p.lineTo(pts.last.dx, pts.last.dy);
+    return (p, tail);
   }
 
   void _stroke(Canvas canvas, Path path, Paint paint, ParentType type) {
@@ -197,6 +275,7 @@ class TreeConnectorPainter extends CustomPainter {
       old.layout != layout ||
       old.line != line ||
       old.accent != accent ||
+      !mapEquals(old.personColors, personColors) ||
       !_setEq(old.highlight, highlight);
 
   static bool _setEq(Set<String> a, Set<String> b) => a.length == b.length && a.containsAll(b);

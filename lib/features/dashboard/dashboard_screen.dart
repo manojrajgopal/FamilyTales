@@ -437,7 +437,7 @@ class _PersonStoryCard extends StatelessWidget {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      PersonAvatarFor(person, size: 40),
+                      PersonAvatarFor(person, size: 40, showGender: true),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Column(

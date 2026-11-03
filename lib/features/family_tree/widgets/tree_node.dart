@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/database/app_database.dart';
+import '../../../core/models/enums.dart';
 import '../../../core/widgets/widgets.dart';
 import '../../family/domain/family_graph.dart';
 import '../layout/tree_layout.dart';
@@ -19,6 +20,7 @@ class TreeNodeCard extends StatelessWidget {
     required this.onTap,
     required this.onExpandChildren,
     required this.onRevealParents,
+    this.showGender = true,
   });
 
   final Person person;
@@ -32,6 +34,9 @@ class TreeNodeCard extends StatelessWidget {
   final VoidCallback onExpandChildren;
   final VoidCallback onRevealParents;
 
+  /// Colours the card's border by gender (the background stays plain).
+  final bool showGender;
+
   /// Vertical space above and below the card reserved for the expand
   /// badges (kept inside the widget so they remain tappable).
   static const badgeSpace = 28.0;
@@ -44,8 +49,10 @@ class TreeNodeCard extends StatelessWidget {
     final focus = node.isFocus;
     final br = BorderRadius.circular(compact ? 20 : 24);
     final years = person.lifespanLabel;
+    final gs = showGender ? GenderStyle.of(person.gender, dark: c.isDark) : null;
 
     final card = AnimatedContainer(
+      key: gs == null ? null : ValueKey('gender-${gs.gender.name}'),
       duration: context.reduceMotion ? Duration.zero : Motion.medium,
       curve: Motion.curve,
       width: w,
@@ -62,8 +69,12 @@ class TreeNodeCard extends StatelessWidget {
       foregroundDecoration: BoxDecoration(
         borderRadius: br,
         border: Border.all(
-          color: selected ? c.accent : (focus ? c.accent.withValues(alpha: 0.45) : c.border),
-          width: selected ? 1.6 : 1,
+          color: selected
+              ? c.accent
+              : gs != null
+                  ? gs.color
+                  : (focus ? c.accent.withValues(alpha: 0.45) : c.border),
+          width: selected ? 2.2 : (gs != null ? 2 : 1),
         ),
       ),
       padding: EdgeInsets.fromLTRB(8, compact ? 10 : 14, 8, 8),
@@ -138,8 +149,9 @@ class TreeNodeCard extends StatelessWidget {
               child: Pressable(
                 onTap: onTap,
                 scale: 0.95,
-                semanticLabel:
-                    '${person.displayName}${years.isEmpty ? '' : ', $years'}${person.isLiving ? '' : ', deceased'}',
+                semanticLabel: '${person.displayName}'
+                    '${person.gender == Gender.unknown ? '' : ', ${person.gender.label}'}'
+                    '${years.isEmpty ? '' : ', $years'}${person.isLiving ? '' : ', deceased'}',
                 child: card,
               ),
             ),

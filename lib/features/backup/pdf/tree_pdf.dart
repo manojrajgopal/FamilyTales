@@ -5,6 +5,7 @@ library;
 
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' show Offset;
 
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -111,23 +112,12 @@ Future<TreePdfResult> buildTreePdf({
     return TreePdfResult(await doc.save(), 1, 0);
   }
 
-  // Bounds of the drawn content.
-  var minX = double.infinity, minY = double.infinity;
-  var maxX = -double.infinity, maxY = -double.infinity;
-  for (final n in layout.nodes.values) {
-    minX = math.min(minX, n.x);
-    minY = math.min(minY, n.y);
-    maxX = math.max(maxX, n.x + o.nodeWidth);
-    maxY = math.max(maxY, n.y + o.nodeHeight);
-  }
-  for (final f in layout.families) {
-    maxY = math.max(maxY, f.busY);
-    minY = math.min(minY, f.busY);
-  }
+  // Bounds of the drawn content (cards and every line).
+  final content = layout.contentBounds;
   const pad = 24.0;
-  final w = maxX - minX + pad * 2;
-  final h = maxY - minY + pad * 2;
-  final dx = pad - minX, dy = pad - minY;
+  final w = content.width + pad * 2;
+  final h = content.height + pad * 2;
+  final dx = pad - content.left, dy = pad - content.top;
 
   PdfPageFormat format;
   switch (options.pageSize) {
@@ -208,6 +198,14 @@ Future<TreePdfResult> buildTreePdf({
     c
       ..setLineCap(PdfLineCap.round)
       ..setLineJoin(PdfLineJoin.round);
+    void polyline(List<Offset> pts) {
+      c.moveTo(x(pts.first.dx), y(pts.first.dy));
+      for (final p in pts.skip(1)) {
+        c.lineTo(x(p.dx), y(p.dy));
+      }
+      c.strokePath();
+    }
+
     // Couple lines.
     for (final pc in layout.partners) {
       final dashed = pc.status != PartnerStatus.current && pc.status != PartnerStatus.widowed;
@@ -215,10 +213,7 @@ Future<TreePdfResult> buildTreePdf({
         ..setStrokeColor(pc.status == PartnerStatus.current ? PdfPalette.accent : PdfPalette.connector)
         ..setLineWidth(1.6);
       if (dashed) c.setLineDashPattern([5, 4]);
-      c
-        ..moveTo(x(pc.from.dx), y(pc.from.dy))
-        ..lineTo(x(pc.to.dx), y(pc.to.dy))
-        ..strokePath();
+      polyline(pc.points(o));
       if (dashed) c.setLineDashPattern();
     }
     // Parent → children buses.
@@ -227,25 +222,11 @@ Future<TreePdfResult> buildTreePdf({
       c
         ..setStrokeColor(PdfPalette.connector)
         ..setLineWidth(1.3);
-      final xs = [f.origin.dx, ...f.children.map((ch) => ch.top.dx)];
-      final lo = xs.reduce(math.min), hi = xs.reduce(math.max);
-      c
-        ..moveTo(x(f.origin.dx), y(f.origin.dy))
-        ..lineTo(x(f.origin.dx), y(f.busY))
-        ..strokePath();
-      if (hi - lo > 0.5) {
-        c
-          ..moveTo(x(lo), y(f.busY))
-          ..lineTo(x(hi), y(f.busY))
-          ..strokePath();
-      }
+      polyline([f.origin, Offset(f.origin.dx, f.busY)]);
       for (final ch in f.children) {
         final dashed = ch.type != ParentType.biological && ch.type != ParentType.unknown;
         if (dashed) c.setLineDashPattern([4, 3]);
-        c
-          ..moveTo(x(ch.top.dx), y(f.busY))
-          ..lineTo(x(ch.top.dx), y(ch.top.dy))
-          ..strokePath();
+        polyline(ch.points(f.origin.dx, f.busY));
         if (dashed) c.setLineDashPattern();
       }
     }

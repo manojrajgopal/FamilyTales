@@ -294,8 +294,11 @@ class GedcomExporter {
       w.raw(1, 'SEX', value: switch (p.gender) {
         Gender.male => 'M',
         Gender.female => 'F',
-        _ => 'U',
+        Gender.nonBinary || Gender.other => 'X',
+        Gender.unknown => 'U',
       });
+      // GEDCOM has one "X" value; keep the finer choice for Family Tales.
+      if (p.gender == Gender.nonBinary) w.raw(2, 'TYPE', value: 'non-binary');
       if (p.isPrivate) w.raw(1, 'RESN', value: 'privacy');
       if (!a) {
         final personCites = citesBy['person:${p.id}'] ?? const <Citation>[];

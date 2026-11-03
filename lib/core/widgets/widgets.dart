@@ -10,3 +10,4 @@ export 'ft_sheets.dart';
 export 'ft_surfaces.dart';
 export 'ft_visuals.dart';
 export 'fuzzy_date_field.dart';
+export 'gender_style.dart';

@@ -363,7 +363,7 @@ class _CandidateCard extends StatelessWidget {
     final c = context.ft;
     Widget person(Person p) => Row(
           children: [
-            PersonAvatarFor(p, size: 42),
+            PersonAvatarFor(p, size: 42, showGender: true),
             const SizedBox(width: Gap.sm),
             Expanded(
               child: Column(
@@ -538,7 +538,7 @@ class _CompareSheetState extends ConsumerState<_CompareSheet> {
     Widget head(Person p, String side) => Expanded(
           child: Column(
             children: [
-              PersonAvatarFor(p, size: 56),
+              PersonAvatarFor(p, size: 56, showGender: true),
               const SizedBox(height: Gap.xs),
               Text(p.displayName,
                   textAlign: TextAlign.center,

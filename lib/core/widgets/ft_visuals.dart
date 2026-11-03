@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../app/theme/tokens.dart';
+import '../models/enums.dart';
+import 'gender_style.dart';
 
 /// Circular person avatar: photo thumbnail when available, otherwise
 /// initials on a graphite gradient. Images are decoded at display size to
@@ -17,6 +19,7 @@ class PersonAvatar extends StatelessWidget {
     this.ring = false,
     this.deceased = false,
     this.heroTag,
+    this.gender,
   });
 
   final String name;
@@ -29,6 +32,9 @@ class PersonAvatar extends StatelessWidget {
   /// Desaturates the photo slightly for deceased relatives.
   final bool deceased;
   final Object? heroTag;
+
+  /// When set (and recorded), a small gender badge sits at the lower left.
+  final Gender? gender;
 
   static String initialsOf(String name) {
     final parts = name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty);
@@ -91,9 +97,24 @@ class PersonAvatar extends StatelessWidget {
       child: ClipOval(child: inner),
     );
     if (heroTag != null) avatar = Hero(tag: heroTag!, child: avatar);
+    final gs = gender == null ? null : GenderStyle.of(gender!, dark: c.isDark);
+    if (gs != null) {
+      final badge = (size * 0.32).clamp(14.0, 34.0);
+      avatar = Stack(
+        clipBehavior: Clip.none,
+        children: [
+          avatar,
+          Positioned(
+            left: -1,
+            bottom: 0,
+            child: GenderBadge(style: gs, size: badge, borderColor: c.cardMid),
+          ),
+        ],
+      );
+    }
     return Semantics(
       image: true,
-      label: 'Photo of $name',
+      label: gs == null ? 'Photo of $name' : 'Photo of $name, ${gs.label}',
       excludeSemantics: true,
       child: avatar,
     );

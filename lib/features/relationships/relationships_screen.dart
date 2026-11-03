@@ -41,7 +41,7 @@ class RelationshipsScreen extends ConsumerWidget {
                   padding: const EdgeInsets.all(16),
                   child: Row(
                     children: [
-                      PersonAvatarFor(p, size: 56, ring: true),
+                      PersonAvatarFor(p, size: 56, ring: true, showGender: true),
                       const SizedBox(width: 14),
                       Expanded(
                         child: Column(

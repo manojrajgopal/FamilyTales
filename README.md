@@ -93,7 +93,7 @@ archive for the App Store. Minimum iOS version: 15.0.
 |---|---|
 | Onboarding | Splash, welcome hero, introduction, create tree, "about you" (photo, name, fuzzy birth date, gender), first members (father/mother/spouse/children/grandparents/later), privacy page (no sample data is ever added) |
 | Home | Greeting pill, live family overview (members, generations, relationships, family lines, ancestors, completeness), quick actions, recent additions, upcoming occasions, recent memories; sections can be hidden/reordered |
-| Family tree | Generated from the database; Focus / Descendants / Ancestors / Full / Compact layouts; pinch-zoom, pan, double-tap zoom, fit, reset, generation filter based on the generations actually in the tree, search, collapse/expand branches, reveal parents, navigate parents/children/partners, lineage highlighting, line styles for biological/adoptive/step/foster/guardian and ended partnerships, multiple trees |
+| Family tree | Generated from the database; Focus / Descendants / Ancestors / Full / Compact layouts; pinch-zoom, pan, double-tap zoom, fit, reset, generation filter based on the generations actually in the tree, search, collapse/expand branches, reveal parents, navigate parents/children/partners, gender colours (blue border and parent line for men, pink for women, violet/amber for non-binary/other, nothing for “not specified”; switch in the layout sheet), lineage highlighting, line styles for biological/adoptive/step/foster/guardian and ended partnerships, multiple trees |
 | Members | Search, filters (living/deceased/archived/tags), sorting, multi-select bulk actions (branch, tag, archive, CSV export, trash) |
 | Profiles | Digital biography: hero photo, relationship to the home person, lifespan/age, biography, life facts, derived family (parents, partners, children, siblings incl. half/step, grandparents, grandchildren), important dates, life events, photos, stories, branches & tags, custom fields, sources, private notes; share / PDF / delete |
 | Add / edit member | One quick page: photo, first / last name, gender, birth date & place, living / passed away. Everything else (other names, death details, life story, custom fields, contact, privacy) sits behind "More details". Quick relative tiles (father, mother, husband, wife, son, daughter, brother, sister) plus 21 more relationship types, existing-person linking, other-parent choice, partner type & status |
@@ -237,14 +237,31 @@ Everything else is derived in `lib/features/family/domain/`:
 ### Tree layout
 
 `TreeLayoutEngine` (pure Dart, unit-tested) is a family-specific layered
-(Sugiyama-style) layout: visible-set selection per view mode → layer assignment →
-partner "units" that always stay adjacent → DFS seed ordering + barycentre
-sweeps keeping the ordering with the fewest crossings → partner orientation
-toward each partner's own family → Sugiyama's **priority method** for x-positions
-(children centred under couples, parents above children) → orthogonal connectors
-with staggered buses. 728 people lay out in ~55 ms. The canvas is an
-`InteractiveViewer.builder` that only builds node widgets intersecting the
-viewport; all connectors are painted by one `CustomPainter`.
+(Sugiyama-style) layout:
+
+1. **Visible set** per view mode.
+2. **Layers**: a child sits below every parent its lines come from (all link
+   types, guardian and foster included); partners share a layer; a branch that
+   married in (with its other children) moves down as one block until it sits
+   just above the child that connects it.
+3. **Units**: partners always stay side by side; a line that skips generations
+   gets a **lane** in every generation it passes, so it never crosses a card.
+4. **Ordering**: DFS seed (in-laws placed beside the couple) + barycentre sweeps,
+   keeping the order with the fewest crossings (O(E log E) crossing count).
+5. **x positions**: Sugiyama's priority method — each block of siblings is
+   centred under its parents, parents over their children, lanes kept straight.
+6. **Channel routing**: every horizontal line in a gap between generations gets
+   its own track and the gap grows to fit them, so no two families share a line.
+   Connectors are computed from the final card coordinates; partners who cannot
+   stand side by side are joined by a bracket on its own track.
+
+Card size is fixed (long names are ellipsised, text scaling does not change it);
+the canvas size and `contentBounds` come from the actual cards and lines. Fit to
+screen frames `contentBounds` and may zoom out below the usual limit for very large
+trees. After an edit the selected person stays where they were on screen; switching
+trees frames the new tree. 1,000 people lay out in ~130 ms, 2,000 in ~140 ms (debug
+test VM). The canvas is an `InteractiveViewer.builder` that only builds node widgets
+intersecting the viewport; all connectors are painted by one `CustomPainter`.
 
 ---
 
@@ -335,22 +352,25 @@ See `docs/DEVELOPMENT.md` for the component catalogue.
 |---|---|
 | `test/domain` | FuzzyDate (all precisions, GEDCOM, ages), siblings, generations, cycle/biological-parent validation, 20+ kinship labels (cousins removed, half-siblings, in-laws, step, adoptive), layout invariants for every mode, collapse, 700+ person performance, relation planner, occasions, repository trash/merge |
 | `test/backup` | Backup → restore round trip, encryption round trip and wrong password, export privacy, GEDCOM export → import |
+| `test/domain/gender_domain_test.dart` | Gender storage and edits, couple order in every layout, gendered relationship names, add-relative presets, duplicate scoring, GEDCOM SEX round trip (including non-binary), merges |
+| `test/layout/tree_layout_engine_test.dart` | Layout checker (no overlaps, no NaN, cards inside the canvas, every relationship drawn once, lines end on their cards, no line through another card, no shared lines) and tests that it catches broken layouts; small/medium/large families; 100–2,000 people with timing; single parents, unknown parents, multiple marriages, half-siblings, in-laws, cousins, adoptive/step/foster/guardian, cross-generation marriages, contradictory data; growth one person at a time, removals, relationship changes, reopening a saved tree |
+| `test/widget/tree_canvas_test.dart` | Fit to screen on small/large Android, iPhone, tablet and landscape (every card on screen, none under the toolbar, none overlapping), zoom in/out/reset, a 300-person tree, viewport-only card building, camera staying on the selected person after edits, removals, switching trees |
 | `test/domain/relation_planner_test.dart` | Every relationship type for every person (no self-links, always a connection), siblings of people without parents, generation-filter depth and layouts for every mode, settings round trip and corrupted-value fallback |
 | `test/domain/regression_test.dart` | One test per fixed bug: trashed relatives still counted in loop / parent-limit checks, merge refusals and field preservation, same-year death dates, impossible dates, GEDCOM `FROM…TO`, ancestor loops in GEDCOM, in-law labels for unknown gender |
 | `test/insights` | Statistics, search engine, branch membership, duplicate detection |
-| `test/widget` | Design-system widgets, dashboard, members search, profile (derived relatives), tree rendering + selection, form validation, calendar grid, small-phone and tablet layouts without overflow; `feature_flows_test.dart`: adding a brother/sister when no parents are recorded (named and unnamed parents), double-tap Save, tree panel chips in light and dark, docked panel position, dynamic generation filter, onboarding without sample data, full-screen toggle |
+| `test/widget` | Design-system widgets, dashboard, members search, profile (derived relatives), tree rendering + selection, form validation, calendar grid, small-phone and tablet layouts without overflow; `feature_flows_test.dart`: adding a brother/sister when no parents are recorded (named and unnamed parents), double-tap Save, tree panel chips in light and dark, docked panel position, dynamic generation filter, onboarding without sample data, full-screen toggle; `gender_display_test.dart`: colour rules and contrast in both themes, tree card borders for every gender/theme/layout, coloured parent lines up to the meeting point, selection panel, preference switch, avatars elsewhere |
 | `integration_test` | Launch → onboarding creates tree, person, parents, spouse, child → tree shows 5 nodes, connections verified → edit via form → event, photo, story → encrypted backup → restart (DB reopened) → restore as new tree → all data verified |
 
 ### Latest results (Flutter 3.47.8, Windows host, Android 17 x86_64 emulator)
 
 * `flutter analyze` – **no issues**.
-* `flutter test` – **146 tests, all passing** (domain, regression, backup, insights, widget, feature flows).
+* `flutter test` – **370 tests, all passing** (domain, regression, backup, insights, widget, feature flows).
 * `integration_test/app_flow_test.dart` – **passed** on the emulator **with
   airplane mode enabled**.
 * Release APK builds; `aapt dump permissions` shows **no INTERNET permission**.
 * On-device check: the database file starts with cipher bytes (not
   `SQLite format 3`) and family names are not readable in the DB or WAL.
-* Layout engine: 728 people laid out in ~55 ms (unit test).
+* Layout engine: 1,000 people in ~130 ms, 2,000 in ~140 ms (unit test, debug VM).
 * Cold start of the release build on the emulator: ~2.5 s to the dashboard.
 
 Note: `flutter test integration_test/...` uninstalls the app afterwards (normal

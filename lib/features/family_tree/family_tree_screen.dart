@@ -48,6 +48,7 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
   FamilyGraph? _layoutGraph;
   TreeLayoutOptions? _layoutOpts;
   TreeLayout? _layout;
+  String? _layoutTreeId;
 
   Size _viewport = Size.zero;
   bool _needsInitialCamera = true;
@@ -91,7 +92,15 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
 
   // ------------------------------------------------------------- layout
 
-  TreeLayout _computeLayout(FamilyGraph g, String focus) {
+  TreeLayout _computeLayout(FamilyGraph g, String focus, String? treeId) {
+    if (treeId != _layoutTreeId) {
+      // Another family tree: start fresh and frame it.
+      if (_layoutTreeId != null) {
+        _collapsed.clear();
+        _needsInitialCamera = true;
+      }
+      _layoutTreeId = treeId;
+    }
     final opts = TreeLayoutOptions(
       mode: _mode,
       focusId: focus,
@@ -105,10 +114,38 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
         _sameOpts(_layoutOpts!, opts)) {
       return _layout!;
     }
+    final previous = _layout;
     _layoutGraph = g;
     _layoutOpts = opts;
-    _layout = TreeLayoutEngine(g).compute(opts);
-    return _layout!;
+    final next = _layout = TreeLayoutEngine(g).compute(opts);
+    if (previous != null && !_needsInitialCamera && _pendingCenterId == null) _keepInPlace(previous, next, focus);
+    return next;
+  }
+
+  /// After an edit the layout is recalculated; keep the selected (or focus)
+  /// person where they were on screen so the tree does not jump. If they
+  /// are gone and nothing is left in view, frame the tree again.
+  void _keepInPlace(TreeLayout before, TreeLayout after, String focus) {
+    final anchor = [_selectedId, focus].firstWhere(
+        (id) => id != null && before.nodes.containsKey(id) && after.nodes.containsKey(id),
+        orElse: () => null);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _layout != after) return;
+      if (anchor == null) {
+        final view = _tc.toScene(Offset.zero) & (_viewport / _scale);
+        final o = after.options;
+        if (!after.nodes.values.any((n) => view.overlaps(n.rect(o)))) _fit(animate: false);
+        return;
+      }
+      final d = after.nodes[anchor]!.center(after.options) - before.nodes[anchor]!.center(before.options);
+      if (d.distance < 0.5) return;
+      final s = _scale;
+      final m = _tc.value.clone();
+      m.setEntry(0, 3, m.entry(0, 3) - d.dx * s);
+      m.setEntry(1, 3, m.entry(1, 3) - d.dy * s);
+      _anim.stop();
+      _tc.value = m;
+    });
   }
 
   bool _sameOpts(TreeLayoutOptions a, TreeLayoutOptions b) =>
@@ -121,7 +158,9 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
 
   // ------------------------------------------------------------- camera
 
-  double get _scale => _tc.value.getMaxScaleOnAxis();
+  /// Current zoom (the x scale; the matrix never scales z, so
+  /// getMaxScaleOnAxis would report 1 whenever the tree is zoomed out).
+  double get _scale => _tc.value.entry(0, 0);
 
   Matrix4 _matrix(double s, double tx, double ty) => Matrix4.identity()
     ..setEntry(0, 0, s)
@@ -139,20 +178,42 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
     _anim.forward(from: 0);
   }
 
-  /// Visible area of the canvas not covered by the header, toolbar or panel.
+  /// Visible area of the canvas not covered by the header, toolbars or panel.
   Rect get _usable {
     final top = MediaQuery.paddingOf(context).top + 72;
     final bottom = AppShell.navClearance(context) + (_selectedId != null ? 170 : 80);
-    return Rect.fromLTRB(0, top, _viewport.width, math.max(top + 100, _viewport.height - bottom));
+    // The zoom toolbar floats on the right: keep the framed tree clear of it.
+    final right = _viewport.width - (context.pagePadding - 6 + 48 + 8);
+    return Rect.fromLTRB(0, top, math.max(100, right), math.max(top + 100, _viewport.height - bottom));
   }
+
+  /// Everything drawn, with room for the expand badges around the cards.
+  static Rect _framed(TreeLayout l) => l.contentBounds.inflate(TreeNodeCard.badgeSpace + 8);
+
+  /// Scale at which the whole tree fits the usable area.
+  double _fitScale(TreeLayout l) {
+    final u = _usable, b = _framed(l);
+    return math.min(u.width / b.width, u.height / b.height);
+  }
+
+  /// Smallest zoom: the usual limit, or less when that is what it takes to
+  /// see a very large tree at once.
+  double get _minScale {
+    final l = _layout;
+    if (l == null || l.isEmpty || _viewport == Size.zero) return _baseMinScale;
+    return math.min(_baseMinScale, math.max(0.02, _fitScale(l) * 0.9));
+  }
+
+  static const _baseMinScale = 0.12;
+  static const _maxScale = 2.6;
 
   void _fit({bool animate = true}) {
     final l = _layout;
     if (l == null || l.isEmpty || _viewport == Size.zero) return;
-    final u = _usable;
-    final s = math.min(u.width / l.size.width, u.height / l.size.height).clamp(0.12, 1.1);
-    final tx = u.center.dx - l.size.width * s / 2;
-    final ty = u.center.dy - l.size.height * s / 2;
+    final u = _usable, b = _framed(l);
+    final s = _fitScale(l).clamp(_minScale, 1.1);
+    final tx = u.center.dx - b.center.dx * s;
+    final ty = u.center.dy - b.center.dy * s;
     final m = _matrix(s, tx, ty);
     animate ? _animateTo(m) : _tc.value = m;
   }
@@ -168,21 +229,19 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
   }
 
   void _zoomBy(double f) {
-    final s = (_scale * f).clamp(0.12, 2.6);
+    final s = (_scale * f).clamp(_minScale, _maxScale);
     final center = _usable.center;
     final scenePoint = _tc.toScene(center);
     _animateTo(_matrix(s, center.dx - scenePoint.dx * s, center.dy - scenePoint.dy * s));
   }
 
-  void _resetCamera(String focus) {
+  void _resetCamera(String focus, {bool animate = true}) {
     final l = _layout;
     if (l == null || l.isEmpty || _viewport == Size.zero) return;
-    final u = _usable;
-    final fitScale = math.min(u.width / l.size.width, u.height / l.size.height);
-    if (fitScale >= 0.42) {
-      _fit();
+    if (_fitScale(l) >= 0.42) {
+      _fit(animate: animate);
     } else {
-      _centerOn(focus, scale: 0.6);
+      _centerOn(focus, scale: 0.6, animate: animate);
     }
   }
 
@@ -328,7 +387,9 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
                   var focus = _focusId;
                   if (focus == null || !g.contains(focus)) focus = home ?? g.people.keys.first;
                   if (_selectedId != null && !g.contains(_selectedId!)) _selectedId = null;
-                  final layout = _computeLayout(g, focus);
+                  // The tree the loaded data belongs to (the active-tree setting changes
+                  // a moment before the new tree's data arrives).
+                  final layout = _computeLayout(g, focus, g.people.values.first.treeId);
                   return _canvas(g, layout, focus);
                 },
               ),
@@ -381,11 +442,7 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
                       FTIconButton(
                         icon: AppIcons.layout,
                         tooltip: 'Change layout',
-                        onTap: () => showTreeLayoutSheet(
-                          context,
-                          mode: _mode,
-                          onMode: _setMode,
-                        ),
+                        onTap: _openLayout,
                       ),
                     ],
                   ),
@@ -410,6 +467,22 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
     }
     final lineColor = Color.alphaBlend(c.text.withValues(alpha: c.isDark ? 0.24 : 0.28), c.bg0);
     final mediaById = ref.watch(mediaByIdProvider);
+    final showGender = ref.watch(settingsProvider.select((s) => s.showGender));
+    // Built once per frame of data, not on every pan/zoom frame.
+    final painter = TreeConnectorPainter(
+      layout: layout,
+      line: lineColor,
+      accent: c.accent,
+      background: c.bg0,
+      highlight: highlight,
+      personColors: showGender
+          ? {
+              for (final id in layout.nodes.keys)
+                if (g[id] != null)
+                  if (GenderStyle.of(g[id]!.gender, dark: c.isDark) case final gs?) id: gs.color,
+            }
+          : const {},
+    );
 
     return LayoutBuilder(builder: (context, cons) {
       _viewport = cons.biggest;
@@ -422,7 +495,9 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
           if (pending != null && layout.nodes.containsKey(pending)) {
             _centerOn(pending, scale: 1);
           } else {
-            _resetCamera(focus);
+            // Instantly: the tab may still be hidden (e.g. behind the import
+            // screen), where animations do not run.
+            _resetCamera(focus, animate: false);
           }
         });
       }
@@ -439,8 +514,8 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
               child: InteractiveViewer.builder(
                 transformationController: _tc,
                 boundaryMargin: EdgeInsets.all(math.max(cons.maxWidth, cons.maxHeight)),
-                minScale: 0.12,
-                maxScale: 2.6,
+                minScale: _minScale,
+                maxScale: _maxScale,
                 onInteractionStart: (_) => _anim.stop(),
                 builder: (context, viewport) {
                   // Virtualise: only build nodes intersecting the viewport.
@@ -453,17 +528,7 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
                       clipBehavior: Clip.none,
                       children: [
                         Positioned.fill(
-                          child: RepaintBoundary(
-                            child: CustomPaint(
-                              painter: TreeConnectorPainter(
-                                layout: layout,
-                                line: lineColor,
-                                accent: c.accent,
-                                background: c.bg0,
-                                highlight: highlight,
-                              ),
-                            ),
-                          ),
+                          child: RepaintBoundary(child: CustomPaint(painter: painter)),
                         ),
                         for (final n in layout.nodes.values)
                           if (vr.overlaps(n.rect(opts)) && g[n.id] != null)
@@ -488,6 +553,7 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
                                   }
                                 },
                                 onRevealParents: () => _setFocus(n.id),
+                                showGender: showGender,
                               ),
                             ),
                       ],
@@ -582,6 +648,8 @@ class _FamilyTreeScreenState extends ConsumerState<FamilyTreeScreen>
       );
     });
   }
+
+  void _openLayout() => showTreeLayoutSheet(context, mode: _mode, onMode: _setMode);
 
   String? _avatarPath(Map<String, MediaAsset> media, Person p) {
     final id = p.profileMediaId;

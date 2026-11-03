@@ -529,7 +529,9 @@ class GedcomImporter {
           p.gender = switch (c.value.trim().toUpperCase()) {
             'M' => Gender.male,
             'F' => Gender.female,
-            'X' => Gender.other,
+            'X' => (c.valueOf('TYPE') ?? '').toLowerCase().replaceAll(RegExp('[^a-z]'), '') == 'nonbinary'
+                ? Gender.nonBinary
+                : Gender.other,
             _ => Gender.unknown,
           };
         case 'BIRT':

@@ -8,15 +8,20 @@ import '../../family/domain/family_graph.dart';
 
 /// Avatar for a [Person] that resolves their profile photo automatically.
 class PersonAvatarFor extends ConsumerWidget {
-  const PersonAvatarFor(this.person, {super.key, this.size = 44, this.ring = false, this.heroTag});
+  const PersonAvatarFor(this.person,
+      {super.key, this.size = 44, this.ring = false, this.heroTag, this.showGender = false});
   final Person person;
   final double size;
   final bool ring;
   final Object? heroTag;
 
+  /// Adds the gender badge (when the "Show gender" preference is on).
+  final bool showGender;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final path = ref.watch(avatarPathProvider(person.profileMediaId));
+    final gender = showGender && ref.watch(settingsProvider.select((s) => s.showGender)) ? person.gender : null;
     return PersonAvatar(
       name: person.displayName,
       imagePath: path,
@@ -24,6 +29,7 @@ class PersonAvatarFor extends ConsumerWidget {
       ring: ring,
       deceased: !person.isLiving,
       heroTag: heroTag,
+      gender: gender,
     );
   }
 }
@@ -72,7 +78,7 @@ class PersonTile extends StatelessWidget {
         ),
         child: Row(
           children: [
-            PersonAvatarFor(person, size: avatarSize, ring: selected),
+            PersonAvatarFor(person, size: avatarSize, ring: selected, showGender: true),
             const SizedBox(width: Gap.md),
             Expanded(
               child: Column(

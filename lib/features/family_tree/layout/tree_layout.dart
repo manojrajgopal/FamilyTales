@@ -42,8 +42,22 @@ class TreeLayoutOptions {
   double get partnerGap => compact ? 26 : 48;
   double get siblingGap => compact ? 14 : 22;
   double get groupGap => compact ? 30 : 46;
+
+  /// Minimum gap between generations; grows when many lines share it.
   double get levelGap => compact ? 58 : 78;
   double get margin => compact ? 120 : 160;
+
+  /// Space between a line passing through a generation and the cards beside it.
+  double get laneGap => compact ? 14 : 20;
+
+  /// Space between two lines passing through a generation side by side.
+  double get laneSpacing => compact ? 8 : 10;
+
+  /// Vertical distance between parallel horizontal lines in one gap.
+  double get trackSpacing => compact ? 8 : 10;
+
+  /// Free space between the cards and the outermost line in a gap.
+  double get trackPadding => compact ? 18 : 24;
 }
 
 class LayoutNode {
@@ -63,7 +77,7 @@ class LayoutNode {
 
 class PartnerConnector {
   const PartnerConnector(this.a, this.b, this.from, this.to, this.status, this.type,
-      {this.adjacent = true});
+      {this.adjacent = true, this.bracketY});
   final String a;
   final String b;
   final Offset from;
@@ -71,13 +85,40 @@ class PartnerConnector {
   final PartnerStatus status;
   final PartnerType type;
   final bool adjacent;
+
+  /// For partners who are not side by side: the height of the bracket drawn
+  /// over the cards between them (its own track in the gap above the row).
+  final double? bracketY;
+
+  /// Where a bracket leaves the top of the left / right card.
+  static const bracketInset = 26.0;
+
+  /// The connector as an orthogonal polyline.
+  List<Offset> points(TreeLayoutOptions o) {
+    final y = bracketY;
+    if (adjacent || y == null) return [from, to];
+    final top = from.dy - _connectorY(o);
+    final ax = from.dx - bracketInset, bx = to.dx + bracketInset;
+    return [Offset(ax, top), Offset(ax, y), Offset(bx, y), Offset(bx, top)];
+  }
 }
 
 class ChildLine {
-  const ChildLine(this.childId, this.type, this.top);
+  const ChildLine(this.childId, this.type, this.top, {this.route});
   final String childId;
   final ParentType type;
+
+  /// Where the line meets the child's card (top centre).
   final Offset top;
+
+  /// Orthogonal waypoints from the family bus to [top] for a child more
+  /// than one generation below (the line keeps to its own lane through the
+  /// generations in between). Null for a child directly below.
+  final List<Offset>? route;
+
+  /// The line from the family bus at [fromX] down to the child.
+  List<Offset> points(double fromX, double busY) =>
+      route ?? [Offset(fromX, busY), Offset(top.dx, busY), top];
 }
 
 /// A parent (or couple) and the children drawn from it with a bus line.
@@ -90,28 +131,44 @@ class FamilyConnector {
 }
 
 class TreeLayout {
-  TreeLayout(this.options, this.nodes, this.partners, this.families, this.size);
+  TreeLayout(this.options, this.nodes, this.partners, this.families, this.size, {Rect? contentBounds})
+      : contentBounds = contentBounds ?? Offset.zero & size;
   final TreeLayoutOptions options;
   final Map<String, LayoutNode> nodes;
   final List<PartnerConnector> partners;
   final List<FamilyConnector> families;
+
+  /// Canvas size: the content plus a margin to pan into.
   final Size size;
+
+  /// Everything that is drawn (cards and lines), in canvas coordinates.
+  final Rect contentBounds;
 
   bool get isEmpty => nodes.isEmpty;
 
   Rect boundsOf(String id) => nodes[id]!.rect(options);
 }
 
+/// Vertical position (from node top) of the partner line: avatar centre.
+double _connectorY(TreeLayoutOptions o) => o.compact ? 34 : 50;
+
 /// Layered ("Sugiyama-style") layout specialised for families:
 ///
 /// 1. Choose the visible people for the view mode.
-/// 2. Assign layers: partners share a layer, children sit below parents.
-/// 3. Group partners into "units" that always stay adjacent.
+/// 2. Assign layers: partners share a layer, children sit below every
+///    parent they are drawn from, and branches that married in move down
+///    as a block to sit just above their child.
+/// 3. Group partners into "units" that always stay adjacent, and give
+///    every line that skips generations a lane unit in each generation it
+///    passes, so it never runs through a card.
 /// 4. Order units per layer (DFS seed + barycentre sweeps, keeping the
 ///    ordering with the fewest edge crossings).
 /// 5. Position units with Sugiyama's priority method so children centre
-///    under their parents and parents above their children.
-/// 6. Build orthogonal connectors (couple → bus → child).
+///    under their parents, parents above their children and lanes run
+///    straight.
+/// 6. Route connectors from the final coordinates: every horizontal line in
+///    a gap between generations gets its own track and the gap grows to
+///    fit them, so no two families share a line.
 class TreeLayoutEngine {
   TreeLayoutEngine(this.g);
   final FamilyGraph g;
@@ -133,18 +190,21 @@ class TreeLayoutEngine {
       final allFamilies = <FamilyConnector>[];
       double offsetX = 0;
       double maxH = 0;
+      Rect? content;
       for (final comp in comps) {
         final part = _layoutSet(o, comp, focus);
-        _shift(part, offsetX, 0);
-        allNodes.addAll(part.nodes);
-        allPartners.addAll(part.partners);
-        allFamilies.addAll(part.families);
+        final shifted = _shift(part, offsetX, 0);
+        allNodes.addAll(shifted.nodes);
+        allPartners.addAll(shifted.partners);
+        allFamilies.addAll(shifted.families);
+        content = content == null ? shifted.contentBounds : content.expandToInclude(shifted.contentBounds);
         offsetX += part.size.width - o.margin + o.groupGap * 2;
         maxH = math.max(maxH, part.size.height);
       }
       _annotateHidden(allNodes, focus);
       return TreeLayout(o, allNodes, allPartners, allFamilies,
-          Size(offsetX - o.groupGap * 2 + o.margin, maxH));
+          Size(offsetX - o.groupGap * 2 + o.margin, maxH),
+          contentBounds: content);
     }
     final res = _layoutSet(o, visible, focus);
     _annotateHidden(res.nodes, focus);
@@ -285,48 +345,53 @@ class TreeLayoutEngine {
     }
   }
 
-  void _shift(TreeLayout l, double dx, double dy) {
+  /// [l] moved by ([dx], [dy]), connectors included.
+  static TreeLayout _shift(TreeLayout l, double dx, double dy) {
+    final d = Offset(dx, dy);
     for (final n in l.nodes.values) {
       n.x += dx;
       n.y += dy;
     }
-    final shifted = l.partners
-        .map((p) => PartnerConnector(p.a, p.b, p.from.translate(dx, dy),
-            p.to.translate(dx, dy), p.status, p.type,
-            adjacent: p.adjacent))
-        .toList();
-    l.partners
-      ..clear()
-      ..addAll(shifted);
-    final fam = l.families
-        .map((f) => FamilyConnector(
-              f.parents,
-              f.origin.translate(dx, dy),
-              f.busY + dy,
-              [
-                for (final c in f.children)
-                  ChildLine(c.childId, c.type, c.top.translate(dx, dy))
-              ],
-            ))
-        .toList();
-    l.families
-      ..clear()
-      ..addAll(fam);
+    return TreeLayout(
+      l.options,
+      l.nodes,
+      [
+        for (final p in l.partners)
+          PartnerConnector(p.a, p.b, p.from + d, p.to + d, p.status, p.type,
+              adjacent: p.adjacent, bracketY: p.bracketY == null ? null : p.bracketY! + dy)
+      ],
+      [
+        for (final f in l.families)
+          FamilyConnector(f.parents, f.origin + d, f.busY + dy, [
+            for (final c in f.children)
+              ChildLine(c.childId, c.type, c.top + d, route: c.route?.map((p) => p + d).toList())
+          ])
+      ],
+      l.size,
+      contentBounds: l.contentBounds.shift(d),
+    );
   }
 
   // ------------------------------------------------------------- layout
 
   TreeLayout _layoutSet(TreeLayoutOptions o, Set<String> v, String focus) {
-    // Edges inside the visible set.
+    final W = o.nodeWidth, H = o.nodeHeight;
+
+    // Edges inside the visible set. Every parent link is drawn, so every
+    // link type constrains the layers: a child always sits below the
+    // parents its lines come from.
     final parentEdges = <(String, String, ParentType)>[]; // parent, child, type
+    final linksOf = <String, List<(String, ParentType)>>{};
     for (final id in v) {
       for (final l in g.parentLinksOf(id)) {
-        if (v.contains(l.parentId)) parentEdges.add((l.parentId, id, l.type));
+        if (l.parentId == id || !v.contains(l.parentId)) continue;
+        parentEdges.add((l.parentId, id, l.type));
+        (linksOf[id] ??= []).add((l.parentId, l.type));
       }
     }
     final partnerEdges = <(String, String)>[];
     for (final s in g.couples) {
-      if (v.contains(s.personAId) && v.contains(s.personBId)) {
+      if (s.personAId != s.personBId && v.contains(s.personAId) && v.contains(s.personBId)) {
         partnerEdges.add((s.personAId, s.personBId));
       }
     }
@@ -354,47 +419,138 @@ class TreeLayoutEngine {
       }
     }
 
-    // Unit-level adjacency (parents above / children below).
+    // ---- families: who each child's lines come from
+    bool sideBySide(String a, String b) {
+      if (unitOf[a] != unitOf[b]) return false;
+      final m = units[unitOf[a]!].members;
+      return (m.indexOf(a) - m.indexOf(b)).abs() == 1 && g.partnershipBetween(a, b) != null;
+    }
+
+    final fams = <_Family>[];
+    final famByKey = <String, _Family>{};
+    _Family famFor(List<String> parents) => famByKey[parents.join('|')] ??= (fams..add(_Family(
+        fams.length, parents, unitOf[parents.first]!, layerOf[parents.first]!))).last;
+    for (final c in ids) {
+      final ls = linksOf[c];
+      if (ls == null) continue;
+      // A child of a couple standing side by side hangs from their line,
+      // when both links are of the same kind (a step-parent's line is drawn
+      // separately from the birth parent's).
+      (String, String, ParentType)? pair;
+      for (var i = 0; i < ls.length; i++) {
+        for (var j = i + 1; j < ls.length; j++) {
+          final a = ls[i], b = ls[j];
+          if (a.$2 != b.$2 || !sideBySide(a.$1, b.$1)) continue;
+          if (pair == null || (a.$2.isLineage && !pair.$3.isLineage)) pair = (a.$1, b.$1, a.$2);
+        }
+      }
+      if (pair != null) {
+        final key = ([pair.$1, pair.$2]..sort());
+        famFor(key).children.add((c, pair.$3));
+      }
+      final done = <String>{};
+      for (final (p, t) in ls) {
+        if (pair != null && (p == pair.$1 || p == pair.$2)) continue;
+        if (!done.add(p)) continue; // duplicate link records
+        famFor([p]).children.add((c, t));
+      }
+    }
+
+    // ---- connections between adjacent layers, with lanes for long lines
+    final conns = <_Conn>[];
+    for (final f in fams) {
+      for (final (c, _) in f.children) {
+        final lc = layerOf[c]!;
+        if (lc <= f.layer) continue; // contradictory data: drawn, not routed
+        final down = _Anchor(unitOf[c]!, person: c);
+        if (lc == f.layer + 1) {
+          conns.add(_Conn(_Anchor(f.unit, family: f), down));
+          continue;
+        }
+        var chain = f.chains[lc];
+        if (chain == null) {
+          chain = [];
+          for (var L = f.layer + 1; L < lc; L++) {
+            final d = _Unit(units.length, L, const []);
+            units.add(d);
+            chain.add(d.index);
+          }
+          f.chains[lc] = chain;
+          conns.add(_Conn(_Anchor(f.unit, family: f), _Anchor(chain.first)));
+          for (var i = 1; i < chain.length; i++) {
+            conns.add(_Conn(_Anchor(chain[i - 1]), _Anchor(chain[i])));
+          }
+        }
+        conns.add(_Conn(_Anchor(chain.last), down));
+      }
+    }
+    final upConns = <int, List<_Conn>>{};
+    final downConns = <int, List<_Conn>>{};
     final upUnits = <int, Set<int>>{};
     final downUnits = <int, Set<int>>{};
-    for (final (p, c, _) in parentEdges) {
-      final up = unitOf[p]!, dn = unitOf[c]!;
-      if (up == dn) continue;
-      (upUnits[dn] ??= {}).add(up);
-      (downUnits[up] ??= {}).add(dn);
+    final personUp = <String, List<int>>{};
+    for (final c in conns) {
+      (upConns[c.down.unit] ??= []).add(c);
+      (downConns[c.up.unit] ??= []).add(c);
+      (upUnits[c.down.unit] ??= {}).add(c.up.unit);
+      (downUnits[c.up.unit] ??= {}).add(c.down.unit);
+      if (c.down.person != null) (personUp[c.down.person!] ??= []).add(c.up.unit);
     }
 
     // ---- ordering
     final layers = List.generate(maxLayer + 1, (_) => <int>[]);
-    _seedOrder(units, layers, unitOf, focus, o.mode, upUnits, downUnits);
+    _seedOrder(units, layers, unitOf, focus, o.mode, upConns, downConns);
     _reduceCrossings(layers, upUnits, downUnits);
-    _orientCouples(units, layers, parentEdges, unitOf);
+    _orientCouples(units, layers, personUp);
 
     // ---- x positioning
-    final W = o.nodeWidth;
     double unitWidth(_Unit u) =>
-        u.members.length * W + (u.members.length - 1) * o.partnerGap;
-    final pos = <int, double>{}; // unit centre x
-
-    // Sibling groups: units sharing a parent family get a tighter gap.
-    String? familyKey(_Unit u) {
-      final ps = <String>{};
-      for (final m in u.members) {
-        for (final (p, c, _) in parentEdges) {
-          if (c == m) ps.add(p);
-        }
-      }
-      if (ps.isEmpty) return null;
-      return (ps.toList()..sort()).join('|');
+        u.isLane ? 0 : u.members.length * W + (u.members.length - 1) * o.partnerGap;
+    double memberOffset(_Unit u, String id) {
+      final i = u.members.indexOf(id);
+      return -unitWidth(u) / 2 + W / 2 + i * (W + o.partnerGap);
     }
 
-    final famKey = {for (final u in units) u.index: familyKey(u)};
+    double familyOffset(_Family f) {
+      final u = units[f.unit];
+      final ps = f.parents;
+      return ps.length == 2
+          ? (memberOffset(u, ps[0]) + memberOffset(u, ps[1])) / 2
+          : memberOffset(u, ps[0]);
+    }
+
+    double anchorOffset(_Anchor a) => a.person != null
+        ? memberOffset(units[a.unit], a.person!)
+        : a.family != null
+            ? familyOffset(a.family!)
+            : 0;
+    for (final c in conns) {
+      c.upOff = anchorOffset(c.up);
+      c.downOff = anchorOffset(c.down);
+    }
+
+    // Sibling groups: units sharing a parent family get a tighter gap.
+    final famKey = <int, String?>{
+      for (final u in units)
+        u.index: u.isLane
+            ? null
+            : () {
+                final ps = <String>{
+                  for (final m in u.members) ...?linksOf[m]?.map((l) => l.$1),
+                };
+                return ps.isEmpty ? null : (ps.toList()..sort()).join('|');
+              }(),
+    };
     double gapBetween(int a, int b) {
+      final la = units[a].isLane, lb = units[b].isLane;
+      if (la && lb) return o.laneSpacing;
+      if (la || lb) return o.laneGap;
       final ka = famKey[a], kb = famKey[b];
       if (ka != null && ka == kb) return o.siblingGap;
       return o.groupGap;
     }
 
+    final pos = <int, double>{}; // unit centre x
     // Initial packing.
     for (final layer in layers) {
       double x = 0;
@@ -407,51 +563,13 @@ class TreeLayoutEngine {
       }
     }
 
-    double memberOffset(_Unit u, String id) {
-      final i = u.members.indexOf(id);
-      return -unitWidth(u) / 2 + W / 2 + i * (W + o.partnerGap);
-    }
-
-    double personX(String id) {
-      final u = units[unitOf[id]!];
-      return pos[u.index]! + memberOffset(u, id);
-    }
-
-    // Family origins: x where a parent (or couple) connects downward.
-    double originX(List<String> parents) {
-      if (parents.length == 2) {
-        return (personX(parents[0]) + personX(parents[1])) / 2;
-      }
-      return personX(parents.first);
-    }
-
-    final childParents = <String, List<String>>{};
-    for (final (p, c, t) in parentEdges) {
-      if (!t.isLineage && t != ParentType.step) continue;
-      (childParents[c] ??= []).add(p);
-    }
-    List<String> familyParentsOf(String child) {
-      final ps = childParents[child] ?? const <String>[];
-      if (ps.length <= 1) return ps;
-      // Prefer a couple that is in the same unit.
-      for (var i = 0; i < ps.length; i++) {
-        for (var j = i + 1; j < ps.length; j++) {
-          if (unitOf[ps[i]] == unitOf[ps[j]] &&
-              g.partnershipBetween(ps[i], ps[j]) != null) {
-            return [ps[i], ps[j]];
-          }
-        }
-      }
-      return [ps.first];
-    }
-
     void placeLayer(List<int> layer, Map<int, double> desired, Map<int, double> prio) {
       final n = layer.length;
       if (n == 0) return;
       final xs = [for (final u in layer) pos[u]!];
       final ws = [for (final u in layer) unitWidth(units[u])];
       final fixed = List.filled(n, false);
-      double minGap(int i) => (ws[i - 1] + ws[i]) / 2 + gapBetween(layer[i - 1], layer[i]);
+      final gaps = [0.0, for (var i = 1; i < n; i++) (ws[i - 1] + ws[i]) / 2 + gapBetween(layer[i - 1], layer[i])];
 
       final order = List.generate(n, (i) => i)
         ..sort((a, b) => (prio[layer[b]] ?? 0).compareTo(prio[layer[a]] ?? 0));
@@ -466,15 +584,15 @@ class TreeLayoutEngine {
           var limit = double.infinity;
           var acc = 0.0;
           for (var j = i + 1; j < n; j++) {
-            acc += minGap(j);
+            acc += gaps[j];
             if (fixed[j]) {
               limit = xs[j] - acc;
               break;
             }
           }
-          xs[i] = math.min(d, limit);
+          xs[i] = math.max(xs[i], math.min(d, limit));
           for (var j = i + 1; j < n; j++) {
-            final need = xs[j - 1] + minGap(j);
+            final need = xs[j - 1] + gaps[j];
             if (xs[j] < need) {
               xs[j] = need;
             } else {
@@ -485,15 +603,15 @@ class TreeLayoutEngine {
           var limit = double.negativeInfinity;
           var acc = 0.0;
           for (var j = i - 1; j >= 0; j--) {
-            acc += minGap(j + 1);
+            acc += gaps[j + 1];
             if (fixed[j]) {
               limit = xs[j] + acc;
               break;
             }
           }
-          xs[i] = math.max(d, limit);
+          xs[i] = math.min(xs[i], math.max(d, limit));
           for (var j = i - 1; j >= 0; j--) {
-            final need = xs[j + 1] - minGap(j + 1);
+            final need = xs[j + 1] - gaps[j + 1];
             if (xs[j] > need) {
               xs[j] = need;
             } else {
@@ -508,66 +626,68 @@ class TreeLayoutEngine {
       }
     }
 
-    void downSweep() {
-      for (var L = 1; L < layers.length; L++) {
-        final desired = <int, double>{};
-        final prio = <int, double>{};
-        for (final ui in layers[L]) {
-          final u = units[ui];
-          var sum = 0.0;
-          var cnt = 0;
-          for (final m in u.members) {
-            final fp = familyParentsOf(m);
-            if (fp.isEmpty) continue;
-            if (fp.any((p) => layerOf[p]! >= L)) continue;
-            sum += originX(fp) - memberOffset(u, m);
-            cnt++;
-          }
-          if (cnt > 0) {
-            desired[ui] = sum / cnt;
-            prio[ui] = 1000.0 * cnt + (downUnits[ui]?.length ?? 0);
-          } else {
-            prio[ui] = 0;
-          }
+    // Each unit wants to sit over (down sweep) or under (up sweep) what it
+    // connects to. Lanes have the highest priority so long lines run
+    // straight.
+    //
+    // Children hanging from one anchor form a block centred under it: the
+    // offset of each connection's unit from the middle of its block.
+    Map<_Conn, double> blockShift(List<int> layer) {
+      final idx = {for (var i = 0; i < layer.length; i++) layer[i]: i};
+      final groups = <(int, double), List<_Conn>>{};
+      for (final ui in layer) {
+        for (final c in upConns[ui] ?? const <_Conn>[]) {
+          (groups[(c.up.unit, c.upOff)] ??= []).add(c);
         }
-        placeLayer(layers[L], desired, prio);
       }
+      final out = <_Conn, double>{};
+      for (final cs in groups.values) {
+        final us = {for (final c in cs) c.down.unit}.toList()..sort((a, b) => idx[a]!.compareTo(idx[b]!));
+        final at = <int, double>{us.first: 0};
+        for (var i = 1; i < us.length; i++) {
+          at[us[i]] = at[us[i - 1]]! +
+              (unitWidth(units[us[i - 1]]) + unitWidth(units[us[i]])) / 2 +
+              gapBetween(us[i - 1], us[i]);
+        }
+        final anchors = [for (final c in cs) at[c.down.unit]! + c.downOff];
+        final mid = (anchors.reduce(math.min) + anchors.reduce(math.max)) / 2;
+        for (final c in cs) {
+          out[c] = at[c.down.unit]! - mid;
+        }
+      }
+      return out;
     }
 
-    void upSweep() {
-      for (var L = layers.length - 2; L >= 0; L--) {
+    void sweep({required bool down}) {
+      for (var k = 0; k < maxLayer; k++) {
+        final L = down ? k + 1 : maxLayer - 1 - k;
         final desired = <int, double>{};
         final prio = <int, double>{};
+        final shift = down ? blockShift(layers[L]) : const <_Conn, double>{};
         for (final ui in layers[L]) {
-          final u = units[ui];
-          // Group children by family origin.
+          final cs = (down ? upConns[ui] : downConns[ui]) ?? const <_Conn>[];
           var sum = 0.0;
-          var weight = 0;
-          final seenFam = <String, List<double>>{};
-          for (final m in u.members) {
-            for (final c in g.childIds(m)) {
-              if (!v.contains(c) || layerOf[c]! <= L) continue;
-              final fp = familyParentsOf(c);
-              if (!fp.contains(m)) continue;
-              final key = fp.join('|');
-              (seenFam[key] ??= []).add(personX(c));
+          if (down) {
+            for (final c in cs) {
+              sum += pos[c.up.unit]! + c.upOff + shift[c]!;
+            }
+          } else {
+            // Over the middle of each block of children it connects to.
+            final groups = <double, List<double>>{};
+            for (final c in cs) {
+              (groups[c.upOff] ??= []).add(pos[c.down.unit]! + c.downOff);
+            }
+            for (final MapEntry(key: off, value: xs) in groups.entries) {
+              sum += ((xs.reduce(math.min) + xs.reduce(math.max)) / 2 - off) * xs.length;
             }
           }
-          for (final e in seenFam.entries) {
-            final parents = e.key.split('|');
-            final mean = e.value.reduce((a, b) => a + b) / e.value.length;
-            // origin offset within unit
-            final off = parents.length == 2
-                ? (memberOffset(u, parents[0]) + memberOffset(u, parents[1])) / 2
-                : memberOffset(u, parents[0]);
-            sum += (mean - off) * e.value.length;
-            weight += e.value.length;
-          }
-          if (weight > 0) {
-            desired[ui] = sum / weight;
-            prio[ui] = 1000.0 * weight;
-          } else {
+          if (cs.isEmpty) {
             prio[ui] = 0;
+          } else {
+            desired[ui] = sum / cs.length;
+            prio[ui] = units[ui].isLane
+                ? 1e9
+                : 1000.0 * cs.length + ((down ? downConns[ui] : upConns[ui])?.length ?? 0);
           }
         }
         placeLayer(layers[L], desired, prio);
@@ -575,125 +695,198 @@ class TreeLayoutEngine {
     }
 
     for (var it = 0; it < 4; it++) {
-      downSweep();
-      upSweep();
+      sweep(down: true);
+      sweep(down: false);
     }
-    downSweep();
+    sweep(down: true);
+
+    double personX(String id) => pos[unitOf[id]]! + memberOffset(units[unitOf[id]!], id);
+    double originX(_Family f) => pos[f.unit]! + familyOffset(f);
+
+    // ---- horizontal lines per gap, each on its own track
+    // Gap k lies between layer k and k + 1; gap -1 is above layer 0.
+    final segs = <_Seg>[];
+    for (final f in fams) {
+      final ox = originX(f);
+      final xs = <double>[
+        for (final (c, _) in f.children)
+          if (layerOf[c] == f.layer + 1) personX(c),
+        for (final chain in f.chains.values) pos[chain.first]!,
+      ];
+      if (xs.isNotEmpty) segs.add(f.bus = _Seg(f.layer, [ox, ...xs]));
+      for (final MapEntry(key: lc, value: chain) in f.chains.entries) {
+        final hops = <_Seg>[];
+        for (var i = 0; i < chain.length; i++) {
+          final x = pos[chain[i]]!;
+          final next = i + 1 < chain.length
+              ? [pos[chain[i + 1]]!]
+              : [for (final (c, _) in f.children) if (layerOf[c] == lc) personX(c)];
+          hops.add(_Seg(units[chain[i]].layer, [x, ...next]));
+        }
+        segs.addAll(hops);
+        f.hops[lc] = hops;
+      }
+    }
+    final brackets = <(String, String), _Seg>{};
+    for (final s in g.couples) {
+      final a = s.personAId, b = s.personBId;
+      if (!unitOf.containsKey(a) || !unitOf.containsKey(b) || a == b) continue;
+      if (layerOf[a] != layerOf[b] || sideBySide(a, b)) continue;
+      final ax = personX(a), bx = personX(b);
+      final (l, r) = ax <= bx ? (ax, bx) : (bx, ax);
+      final seg = _Seg(layerOf[a]! - 1, [l + W / 2 - PartnerConnector.bracketInset, r - W / 2 + PartnerConnector.bracketInset]);
+      brackets[(a, b)] = seg;
+      segs.add(seg);
+    }
+    final tracks = <int, int>{}; // gap -> number of tracks
+    final byGap = <int, List<_Seg>>{};
+    for (final s in segs) {
+      (byGap[s.gap] ??= []).add(s);
+    }
+    for (final MapEntry(key: gap, value: list) in byGap.entries) {
+      list.sort((a, b) {
+        final c = a.lo.compareTo(b.lo);
+        return c != 0 ? c : a.hi.compareTo(b.hi);
+      });
+      final ends = <double>[];
+      for (final s in list) {
+        var t = 0;
+        while (t < ends.length && ends[t] + o.trackSpacing > s.lo) {
+          t++;
+        }
+        if (t == ends.length) ends.add(0);
+        ends[t] = math.max(s.hi, s.lo);
+        s.track = t;
+      }
+      tracks[gap] = ends.length;
+    }
+    double gapHeight(int k) =>
+        math.max(o.levelGap, 2 * o.trackPadding + ((tracks[k] ?? 1) - 1) * o.trackSpacing);
+    final layerTop = <double>[0];
+    for (var L = 1; L <= maxLayer; L++) {
+      layerTop.add(layerTop[L - 1] + H + gapHeight(L - 1));
+    }
+    double trackY(_Seg s) {
+      final n = tracks[s.gap] ?? 1;
+      if (s.gap < 0) return -o.trackPadding - (n - 1 - s.track) * o.trackSpacing;
+      final mid = layerTop[s.gap] + H + gapHeight(s.gap) / 2;
+      return mid - (n - 1) * o.trackSpacing / 2 + s.track * o.trackSpacing;
+    }
 
     // ---- final coordinates
     final nodes = <String, LayoutNode>{};
-    double minX = double.infinity, maxX = double.negativeInfinity;
     for (final u in units) {
       for (final m in u.members) {
-        final cx = pos[u.index]! + memberOffset(u, m);
-        final n = LayoutNode(m, u.layer)
-          ..x = cx - W / 2
-          ..y = u.layer * (o.nodeHeight + o.levelGap);
-        nodes[m] = n;
-        minX = math.min(minX, n.x);
-        maxX = math.max(maxX, n.x + W);
+        nodes[m] = LayoutNode(m, u.layer)
+          ..x = personX(m) - W / 2
+          ..y = layerTop[u.layer];
       }
     }
-    final dx = o.margin - minX;
-    for (final n in nodes.values) {
-      n.x += dx;
-      n.y += o.margin;
-    }
-    final width = (maxX - minX) + o.margin * 2;
-    final height = (maxLayer + 1) * o.nodeHeight + maxLayer * o.levelGap + o.margin * 2;
 
-    // ---- connectors
+    // ---- connectors, from the final card coordinates
     final partners = <PartnerConnector>[];
     for (final s in g.couples) {
       final a = nodes[s.personAId], b = nodes[s.personBId];
-      if (a == null || b == null) continue;
-      final adjacent = unitOf[a.id] == unitOf[b.id] &&
-          (units[unitOf[a.id]!].members.indexOf(a.id) -
-                      units[unitOf[a.id]!].members.indexOf(b.id))
-                  .abs() ==
-              1;
+      if (a == null || b == null || a == b) continue;
       final left = a.x <= b.x ? a : b;
       final right = left == a ? b : a;
       final y = left.y + _connectorY(o);
+      final bracket = brackets[(s.personAId, s.personBId)];
       partners.add(PartnerConnector(
         left.id,
         right.id,
         Offset(left.x + W, y),
-        Offset(right.x, y),
+        Offset(right.x, right.y + _connectorY(o)),
         s.status,
         s.type,
-        adjacent: adjacent,
+        adjacent: sideBySide(a.id, b.id),
+        bracketY: bracket == null ? null : trackY(bracket),
       ));
     }
 
-    final famMap = <String, FamilyConnector>{};
-    for (final c in nodes.keys) {
-      final links = g.parentLinksOf(c).where((l) => nodes.containsKey(l.parentId)).toList();
-      if (links.isEmpty) continue;
-      final pair = familyParentsOf(c);
-      final handled = <String>{};
-      if (pair.length == 2) {
-        final key = pair.join('|');
-        final pa = nodes[pair[0]]!, pb = nodes[pair[1]]!;
-        final origin = Offset(
-          (pa.x + pb.x + W) / 2,
-          pa.y + _connectorY(o),
-        );
-        final fam = famMap[key] ??= FamilyConnector(
-          pair,
-          origin,
-          pa.y + o.nodeHeight + o.levelGap / 2,
-          [],
-        );
-        final t = links.firstWhere((l) => l.parentId == pair[0]).type;
-        fam.children.add(ChildLine(c, t, Offset(nodes[c]!.x + W / 2, nodes[c]!.y)));
-        handled.addAll(pair);
-      }
-      for (final l in links) {
-        if (handled.contains(l.parentId)) continue;
-        final p = nodes[l.parentId]!;
-        final key = '${l.parentId}#${l.type.name}';
-        final fam = famMap[key] ??= FamilyConnector(
-          [l.parentId],
-          Offset(p.x + W / 2, p.y + o.nodeHeight),
-          p.y + o.nodeHeight + o.levelGap / 2,
-          [],
-        );
-        fam.children.add(ChildLine(c, l.type, Offset(nodes[c]!.x + W / 2, nodes[c]!.y)));
-      }
-    }
-    // Stagger overlapping buses on the same level so lines stay readable.
-    final families = famMap.values.toList();
-    final byLevel = <double, List<FamilyConnector>>{};
-    for (final f in families) {
-      (byLevel[f.busY] ??= []).add(f);
-    }
-    final result = <FamilyConnector>[];
-    for (final group in byLevel.values) {
-      group.sort((a, b) => a.origin.dx.compareTo(b.origin.dx));
-      final ranges = <(double, double, int)>[];
-      for (final f in group) {
-        final xs = [f.origin.dx, ...f.children.map((c) => c.top.dx)];
-        final lo = xs.reduce(math.min), hi = xs.reduce(math.max);
-        var slot = 0;
-        final used = ranges
-            .where((r) => r.$1 < hi + 6 && lo - 6 < r.$2)
-            .map((r) => r.$3)
-            .toSet();
-        while (used.contains(slot)) {
-          slot++;
+    final families = <FamilyConnector>[];
+    for (final f in fams) {
+      final ps = [...f.parents]..sort((a, b) => nodes[a]!.x.compareTo(nodes[b]!.x));
+      final p0 = nodes[ps.first]!;
+      final ox = originX(f);
+      final origin = ps.length == 2 ? Offset(ox, p0.y + _connectorY(o)) : Offset(ox, p0.y + H);
+      final bus = f.bus;
+      final busY = bus != null ? trackY(bus) : p0.y + H + gapHeight(f.layer) / 2;
+      final lines = <ChildLine>[];
+      for (final (c, t) in f.children) {
+        final n = nodes[c]!;
+        final top = Offset(n.x + W / 2, n.y);
+        final lc = n.layer;
+        final hops = f.hops[lc];
+        if (lc == f.layer + 1) {
+          lines.add(ChildLine(c, t, top));
+        } else if (hops != null) {
+          // Down the lane through each generation, jogging on its own track.
+          final chain = f.chains[lc]!;
+          final route = [Offset(ox, busY)];
+          var y = busY;
+          for (var i = 0; i < chain.length; i++) {
+            final x = pos[chain[i]]!;
+            route
+              ..add(Offset(x, y))
+              ..add(Offset(x, y = trackY(hops[i])));
+          }
+          route
+            ..add(Offset(top.dx, y))
+            ..add(top);
+          lines.add(ChildLine(c, t, top, route: _simplify(route)));
+        } else {
+          // Contradictory data (child not below this parent): join the
+          // bottom of the child's card.
+          final bottom = Offset(top.dx, n.y + H);
+          lines.add(ChildLine(c, t, bottom, route: [Offset(ox, busY), Offset(top.dx, busY), bottom]));
         }
-        ranges.add((lo, hi, slot));
-        final offset = slot == 0 ? 0.0 : ((slot + 1) ~/ 2) * 9.0 * (slot.isOdd ? -1 : 1);
-        result.add(FamilyConnector(f.parents, f.origin, f.busY + offset, f.children));
       }
+      families.add(FamilyConnector(ps, origin, busY, lines));
     }
 
-    return TreeLayout(o, nodes, partners, result, Size(width, height));
+    // ---- bounds
+    var content = Rect.zero;
+    var first = true;
+    void include(Offset p) {
+      content = first ? Rect.fromPoints(p, p) : content.expandToInclude(Rect.fromPoints(p, p));
+      first = false;
+    }
+
+    for (final n in nodes.values) {
+      include(Offset(n.x, n.y));
+      include(Offset(n.x + W, n.y + H));
+    }
+    for (final p in partners) {
+      p.points(o).forEach(include);
+    }
+    for (final f in families) {
+      include(f.origin);
+      for (final c in f.children) {
+        c.points(f.origin.dx, f.busY).forEach(include);
+      }
+    }
+    final laid = TreeLayout(o, nodes, partners, families,
+        Size(content.width + o.margin * 2, content.height + o.margin * 2),
+        contentBounds: content);
+    return _shift(laid, o.margin - content.left, o.margin - content.top);
   }
 
-  /// Vertical position (from node top) of the partner line: avatar centre.
-  static double _connectorY(TreeLayoutOptions o) => o.compact ? 34 : 50;
+  /// Drops repeated and collinear points from an orthogonal polyline.
+  static List<Offset> _simplify(List<Offset> pts) {
+    final out = <Offset>[];
+    for (final p in pts) {
+      if (out.isNotEmpty && (out.last - p).distance < 0.01) continue;
+      if (out.length >= 2) {
+        final a = out[out.length - 2], b = out.last;
+        final collinear = ((a.dx - b.dx).abs() < 0.01 && (b.dx - p.dx).abs() < 0.01) ||
+            ((a.dy - b.dy).abs() < 0.01 && (b.dy - p.dy).abs() < 0.01);
+        if (collinear) out.removeLast();
+      }
+      out.add(p);
+    }
+    return out;
+  }
 
   int _byBirth(String a, String b) {
     final pa = g[a]!, pb = g[b]!;
@@ -701,7 +894,8 @@ class TreeLayoutEngine {
     final kb = pb.birth?.sortKey ?? double.infinity;
     final c = ka.compareTo(kb);
     if (c != 0) return c;
-    return pa.createdAt.compareTo(pb.createdAt);
+    final t = pa.createdAt.compareTo(pb.createdAt);
+    return t != 0 ? t : a.compareTo(b);
   }
 
   /// Orders a partner component as a chain, hub in the middle.
@@ -758,14 +952,18 @@ class TreeLayoutEngine {
     return [...left.reversed, hub, ...right];
   }
 
+  /// Layer of every person: children below all their parents, partners on
+  /// one layer, and as little empty space between generations as possible.
   Map<String, int> _assignLayers(Set<String> v,
       List<(String, String, ParentType)> pe, List<(String, String)> se) {
     final layer = {for (final id in v) id: 0};
     final n = v.length;
-    final lineage = pe.where((e) => e.$3.isLineage || e.$3 == ParentType.step).toList();
+    // 1) Longest path from the top with partner equalisation. Bounded, so
+    //    contradictory data (a partner who is also a descendant) cannot
+    //    loop forever.
     for (var iter = 0; iter < n + 2; iter++) {
       var changed = false;
-      for (final (p, c, _) in lineage) {
+      for (final (p, c, _) in pe) {
         if (layer[c]! < layer[p]! + 1) {
           layer[c] = layer[p]! + 1;
           changed = true;
@@ -781,10 +979,13 @@ class TreeLayoutEngine {
       }
       if (!changed) break;
     }
-    // Pull parentless roots down next to their children.
+
+    // 2) A branch that married in (parents without parents of their own,
+    //    with their other children and partners) moves down as one block
+    //    until it sits just above the child that connects it.
     final parentsOf = <String, List<String>>{};
     final childrenOf = <String, List<String>>{};
-    for (final (p, c, _) in lineage) {
+    for (final (p, c, _) in pe) {
       (parentsOf[c] ??= []).add(p);
       (childrenOf[p] ??= []).add(c);
     }
@@ -793,24 +994,62 @@ class TreeLayoutEngine {
       (partnersOf[a] ??= []).add(b);
       (partnersOf[b] ??= []).add(a);
     }
-    for (var iter = 0; iter < 4; iter++) {
+    bool hasParents(String id) => (parentsOf[id] ?? const []).isNotEmpty;
+
+    for (var round = 0; round < 8; round++) {
       var changed = false;
+      final seen = <String>{};
       for (final id in v) {
-        if ((parentsOf[id] ?? const []).isNotEmpty) continue;
-        final kids = childrenOf[id] ?? const <String>[];
-        if (kids.isEmpty) continue;
-        var target = kids.map((k) => layer[k]!).reduce(math.min) - 1;
-        final ps = partnersOf[id] ?? const <String>[];
-        for (final p in ps) {
-          if ((parentsOf[p] ?? const []).isNotEmpty) target = math.min(target, layer[p]!);
-        }
-        if (target > layer[id]!) {
-          layer[id] = target;
-          for (final p in ps) {
-            if ((parentsOf[p] ?? const []).isEmpty && layer[p]! < target) layer[p] = target;
+        if (seen.contains(id) || hasParents(id)) continue;
+        // Root group: partners connected to [id], none with parents.
+        final root = <String>{id};
+        final q = Queue<String>()..add(id);
+        var ok = true;
+        while (q.isNotEmpty) {
+          final x = q.removeFirst();
+          for (final p in partnersOf[x] ?? const <String>[]) {
+            if (hasParents(p)) ok = false;
+            if (root.add(p)) q.add(p);
           }
-          changed = true;
         }
+        seen.addAll(root);
+        if (!ok) continue;
+        // Everything below, then keep only what is closed upwards: all its
+        // parents and partners are inside the block too.
+        final block = <String>{...root};
+        final bq = Queue<String>()..addAll(root);
+        while (bq.isNotEmpty) {
+          final x = bq.removeFirst();
+          for (final c in childrenOf[x] ?? const <String>[]) {
+            if (block.add(c)) bq.add(c);
+          }
+          for (final p in partnersOf[x] ?? const <String>[]) {
+            if (block.add(p)) bq.add(p);
+          }
+        }
+        var pruned = true;
+        while (pruned) {
+          pruned = false;
+          block.removeWhere((x) {
+            if (root.contains(x)) return false;
+            final out = (parentsOf[x] ?? const <String>[]).any((p) => !block.contains(p)) ||
+                (partnersOf[x] ?? const <String>[]).any((p) => !block.contains(p));
+            if (out) pruned = true;
+            return out;
+          });
+        }
+        if (root.any((r) => !block.contains(r))) continue;
+        var slack = 1 << 30;
+        for (final x in block) {
+          for (final c in childrenOf[x] ?? const <String>[]) {
+            if (!block.contains(c)) slack = math.min(slack, layer[c]! - layer[x]! - 1);
+          }
+        }
+        if (slack <= 0 || slack == 1 << 30) continue;
+        for (final x in block) {
+          layer[x] = layer[x]! + slack;
+        }
+        changed = true;
       }
       if (!changed) break;
     }
@@ -825,12 +1064,14 @@ class TreeLayoutEngine {
     Map<String, int> unitOf,
     String focus,
     TreeViewMode mode,
-    Map<int, Set<int>> up,
-    Map<int, Set<int>> down,
+    Map<int, List<_Conn>> up,
+    Map<int, List<_Conn>> down,
   ) {
     final placed = <int>{};
-    void place(int u) {
-      if (placed.add(u)) layers[units[u].layer].add(u);
+    bool place(int u) {
+      if (!placed.add(u)) return false;
+      layers[units[u].layer].add(u);
+      return true;
     }
 
     if (mode == TreeViewMode.ancestors) {
@@ -853,26 +1094,45 @@ class TreeLayoutEngine {
 
       visitUp(unitOf[focus]!);
     } else {
+      // The first person a connection leads to (through any lanes).
+      String? lead(_Conn c) {
+        var a = c.down;
+        while (a.person == null) {
+          final next = down[a.unit];
+          if (next == null || next.isEmpty) return null;
+          a = next.first.down;
+        }
+        return a.person;
+      }
+
+      int byLead(_Conn a, _Conn b) {
+        final la = lead(a), lb = lead(b);
+        if (la == null || lb == null) return (la == null ? 1 : 0) - (lb == null ? 1 : 0);
+        return _byBirth(la, lb);
+      }
+
       // DFS downward from top-layer units, children by birth order.
       void visitDown(int u) {
-        place(u);
-        final kids = <String>[];
-        for (final m in units[u].members) {
-          kids.addAll(g.childIds(m).where(unitOf.containsKey));
+        if (!place(u)) return;
+        // In-laws: the roots a partner descends from sit beside the couple.
+        if (!units[u].isLane) {
+          for (final c in up[u] ?? const <_Conn>[]) {
+            var src = c.up.unit;
+            while (units[src].isLane && (up[src]?.isNotEmpty ?? false)) {
+              src = up[src]!.first.up.unit;
+            }
+            if ((up[src] ?? const []).isEmpty && !placed.contains(src)) visitDown(src);
+          }
         }
-        kids.sort(_byBirth);
-        for (final k in kids) {
-          final ku = unitOf[k]!;
-          if (placed.contains(ku)) continue;
-          // Bring in the child's partner's parents first so in-laws sit
-          // beside the couple.
-          visitDown(ku);
+        final next = [...?down[u]]..sort(byLead);
+        for (final c in next) {
+          visitDown(c.down.unit);
         }
       }
 
       final roots = [
         for (final u in units)
-          if ((up[u.index] ?? const {}).isEmpty) u.index
+          if (!u.isLane && (up[u.index] ?? const []).isEmpty) u.index
       ]..sort((a, b) {
           final la = units[a].layer.compareTo(units[b].layer);
           if (la != 0) return la;
@@ -883,11 +1143,10 @@ class TreeLayoutEngine {
       roots.sort((a, b) {
         final fa = units[a].members.any(focusAnc.contains) ? 0 : 1;
         final fb = units[b].members.any(focusAnc.contains) ? 0 : 1;
-        if (fa != fb) return fa.compareTo(fb);
-        return 0;
+        return fa.compareTo(fb);
       });
       for (final r in roots) {
-        if (!placed.contains(r)) visitDown(r);
+        visitDown(r);
       }
     }
     for (final u in units) {
@@ -895,26 +1154,49 @@ class TreeLayoutEngine {
     }
   }
 
+  /// Edge crossings between consecutive layers (inversion count).
   int _crossings(List<List<int>> layers, Map<int, Set<int>> down) {
     var total = 0;
     for (var L = 0; L < layers.length - 1; L++) {
-      final posUp = {for (var i = 0; i < layers[L].length; i++) layers[L][i]: i};
       final posDn = {for (var i = 0; i < layers[L + 1].length; i++) layers[L + 1][i]: i};
-      final edges = <(int, int)>[];
+      final seq = <int>[];
       for (final u in layers[L]) {
-        for (final d in down[u] ?? const <int>{}) {
-          final pd = posDn[d];
-          if (pd != null) edges.add((posUp[u]!, pd));
-        }
+        final ds = [for (final d in down[u] ?? const <int>{}) ?posDn[d]]..sort();
+        seq.addAll(ds);
       }
-      for (var i = 0; i < edges.length; i++) {
-        for (var j = i + 1; j < edges.length; j++) {
-          final a = edges[i], b = edges[j];
-          if ((a.$1 - b.$1) * (a.$2 - b.$2) < 0) total++;
-        }
-      }
+      total += _inversions(seq);
     }
     return total;
+  }
+
+  static int _inversions(List<int> a) {
+    if (a.length < 2) return 0;
+    var buf = List<int>.of(a), tmp = List<int>.filled(a.length, 0);
+    var count = 0;
+    for (var width = 1; width < a.length; width *= 2) {
+      for (var lo = 0; lo < a.length; lo += 2 * width) {
+        final mid = math.min(lo + width, a.length), hi = math.min(lo + 2 * width, a.length);
+        var i = lo, j = mid, k = lo;
+        while (i < mid && j < hi) {
+          if (buf[j] < buf[i]) {
+            count += mid - i;
+            tmp[k++] = buf[j++];
+          } else {
+            tmp[k++] = buf[i++];
+          }
+        }
+        while (i < mid) {
+          tmp[k++] = buf[i++];
+        }
+        while (j < hi) {
+          tmp[k++] = buf[j++];
+        }
+      }
+      final t = buf;
+      buf = tmp;
+      tmp = t;
+    }
+    return count;
   }
 
   void _reduceCrossings(List<List<int>> layers, Map<int, Set<int>> up,
@@ -987,8 +1269,7 @@ class TreeLayoutEngine {
 
   /// Within two-person units, place each partner on the side of their own
   /// parents to avoid crossing lines.
-  void _orientCouples(List<_Unit> units, List<List<int>> layers,
-      List<(String, String, ParentType)> pe, Map<String, int> unitOf) {
+  void _orientCouples(List<_Unit> units, List<List<int>> layers, Map<String, List<int>> personUp) {
     // Normalised horizontal position (0..1) of each unit within its layer,
     // comparable across layers.
     final posN = <int, double>{};
@@ -998,9 +1279,9 @@ class TreeLayoutEngine {
       }
     }
     double? parentPos(String id) {
-      final ps = [for (final (p, c, _) in pe) if (c == id) p];
-      if (ps.isEmpty) return null;
-      return ps.map((p) => posN[unitOf[p]!]!).reduce((a, b) => a + b) / ps.length;
+      final ups = personUp[id];
+      if (ups == null || ups.isEmpty) return null;
+      return ups.map((u) => posN[u]!).reduce((a, b) => a + b) / ups.length;
     }
 
     void flip(_Unit u) => u.members.setAll(0, [u.members[1], u.members[0]]);
@@ -1025,5 +1306,55 @@ class _Unit {
   _Unit(this.index, this.layer, this.members);
   final int index;
   final int layer;
+
+  /// People side by side (partners); empty for a lane that carries a line
+  /// through this layer.
   final List<String> members;
+
+  bool get isLane => members.isEmpty;
+}
+
+/// A parent or couple and the children whose lines come from them.
+class _Family {
+  _Family(this.id, this.parents, this.unit, this.layer);
+  final int id;
+  final List<String> parents;
+  final int unit;
+  final int layer;
+  final children = <(String, ParentType)>[];
+
+  /// Lanes towards children further down, by the children's layer.
+  final chains = <int, List<int>>{};
+
+  /// The family's own horizontal line, and the jogs of each lane.
+  _Seg? bus;
+  final hops = <int, List<_Seg>>{};
+}
+
+/// Where a connection attaches to a unit: a person, a family's origin or
+/// (neither) a lane.
+class _Anchor {
+  _Anchor(this.unit, {this.person, this.family});
+  final int unit;
+  final String? person;
+  final _Family? family;
+}
+
+class _Conn {
+  _Conn(this.up, this.down);
+  final _Anchor up;
+  final _Anchor down;
+  double upOff = 0;
+  double downOff = 0;
+}
+
+/// A horizontal line in the gap below layer [gap].
+class _Seg {
+  _Seg(this.gap, List<double> xs)
+      : lo = xs.reduce(math.min),
+        hi = xs.reduce(math.max);
+  final int gap;
+  final double lo;
+  final double hi;
+  int track = 0;
 }
